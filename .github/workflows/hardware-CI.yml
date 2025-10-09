@@ -1,0 +1,209 @@
+name: Hardware CI Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      repository_url:
+        description: 'Repository URL for Test-O-Matic-hardwareCI'
+        required: false
+        default: 'https://github.com/Ruggero-R/Test-O-Matic-hardwareCI-R.git'
+        type: string
+      test_parameters:
+        description: 'Test parameters to run (e.g., serialMS, i2c, can)'
+        required: false
+        default: 'serialMS i2c can'
+        type: string
+
+jobs:
+  hardware-tests:
+    runs-on: self-hosted
+    
+    steps:
+    - name: Checkout current repository
+      uses: actions/checkout@v4
+      
+    - name: Verify external repository accessibility
+      run: |
+        echo "Testing repository accessibility..."
+        repo_url="https://github.com/Ruggero-R/Test-O-Matic-hardwareCI-R.git"
+        
+        # Check PAT_TOKEN availability
+        if [ -n "$PAT_TOKEN" ]; then
+          echo "PAT_TOKEN is available (length: ${#PAT_TOKEN})"
+        fi
+
+        # Test if repository exists and is accessible
+        if curl -s -f -I "https://github.com/Ruggero-R/Test-O-Matic-hardwareCI-R" > /dev/null; then
+          echo "Repository is publicly accessible"
+        else
+          echo "Repository may be private or doesn't exist"
+          echo "Will attempt clone with authentication..."
+        fi
+        
+        # Test API access with PAT_TOKEN
+        if [ -n "$PAT_TOKEN" ]; then
+          echo "Testing API access with PAT_TOKEN..."
+          if curl -s -H "Authorization: token $PAT_TOKEN" \
+             "https://api.github.com/repos/Ruggero-R/Test-O-Matic-hardwareCI-R" > /dev/null; then
+            echo "PAT_TOKEN has access to repository"
+          else
+            echo "PAT_TOKEN does not have access to repository"
+            echo "Please check that your PAT has 'repo' scope for private repositories"
+          fi
+        fi
+      env:
+        PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      shell: bash
+      
+    - name: Clone Test-O-Matic-hardwareCI repository
+      id: checkout-external
+      uses: actions/checkout@v4
+      with:
+        repository: Ruggero-R/Test-O-Matic-hardwareCI-R
+        path: test-o-matic
+        token: ${{ secrets.PAT_TOKEN }}
+      continue-on-error: true
+        
+    - name: Set up Go
+      run: |
+        # Cross-platform Go setup
+        echo "Checking Go installation..."
+        if command -v go >/dev/null 2>&1; then
+          go_version=$(go version)
+          echo "Go version: $go_version"
+        else
+          echo "::error::Go is not installed or not in PATH"
+          exit 1
+        fi
+      shell: bash
+        
+    - name: Install dependencies
+      run: |
+        # Cross-platform dependency installation
+        echo "Installing Go dependencies..."
+        cd "test-o-matic/unit-tests"
+        go mod download
+        if [ $? -ne 0 ]; then
+          echo "::error::Failed to download Go dependencies"
+          exit 1
+        fi
+        echo "Dependencies installed successfully!"
+      shell: bash
+        
+    - name: Run hardware tests
+      run: |
+        # Cross-platform test execution with comprehensive error handling
+        cd "test-o-matic/unit-tests"
+        
+        # Verify main.go exists
+        if [ ! -f "main.go" ]; then
+          echo "::error::main.go not found in $(pwd)"
+          echo "::error::Available files:"
+          ls -la
+          exit 1
+        fi
+        
+        test_params="${{ github.event.inputs.test_parameters }}"
+        if [ -z "$test_params" ]; then
+          test_params="serialMS i2c can"
+        fi
+        echo "Running tests with parameters: $test_params"
+        
+        # Build the go command with test parameters
+        go_args="run main.go"
+        for param in $test_params; do
+          go_args="$go_args -test $param"
+        done
+        
+        echo "Executing: go $go_args"
+        echo "Working directory: $(pwd)"
+        
+        # Execute with comprehensive error handling
+        set +e  # Don't exit immediately on error to capture exit code
+        go $go_args 2>&1 | tee test_output.log  # Capture both stdout and stderr
+        exit_code=${PIPESTATUS[0]}  # Get the exit code of the go command, not tee
+        set -e  # Re-enable exit on error
+        
+        echo "Go command finished with exit code: $exit_code"
+        
+        # Check for error keywords in the output (case-insensitive)
+        error_found=false
+        if [ -f "test_output.log" ]; then
+          if grep -iq -E "(error|fail|failed|failure)" test_output.log; then
+            error_found=true
+            echo "Error keywords detected in test output"
+          fi
+        fi
+        
+        # Check exit code and provide detailed error information
+        if [ $exit_code -ne 0 ] || [ "$error_found" = true ]; then
+          if [ $exit_code -ne 0 ]; then
+            echo "::error::Hardware tests failed with exit code: $exit_code"
+          fi
+          if [ "$error_found" = true ]; then
+            echo "::error::Hardware tests failed: Error keywords detected in output"
+          fi
+          
+          echo "::group::Test Output"
+          cat test_output.log 2>/dev/null || echo "No test output available"
+          echo "::endgroup::"
+          
+          if [ "$error_found" = true ]; then
+            echo "::group::Error Lines"
+            echo "Lines containing error keywords:"
+            grep -in -E "(error|fail|failed|failure)" test_output.log 2>/dev/null || echo "No specific error lines found"
+            echo "::endgroup::"
+          fi
+          
+          echo "::error::The Go program encountered an error during execution."
+          echo "::error::Please check the test output above for more details."
+          exit 1
+        fi
+        
+        echo "Hardware tests completed successfully!"
+      shell: bash
+        
+    - name: Upload test results
+      if: always()
+      run: |
+        # Cross-platform test result handling - only latest file
+        echo "Looking for test result files..."
+        
+        # Check if test results exist and find the most recent one
+        if ls "test-o-matic/unit-tests"/test_results_*.json 1> /dev/null 2>&1; then
+          echo "Test result files found:"
+          ls -la "test-o-matic/unit-tests"/test_results_*.json
+          
+          # Find the most recent test result file
+          latest_file=$(ls -t "test-o-matic/unit-tests"/test_results_*.json | head -n 1)
+          echo "Latest test result file: $latest_file"
+          
+          # Create artifacts directory
+          mkdir -p "artifacts"
+          
+          # Copy only the latest test result
+          if [ -f "$latest_file" ]; then
+            cp "$latest_file" "artifacts/" 
+            echo "Latest test result copied to artifacts directory"
+            echo "Uploaded file:"
+            ls -la "artifacts/"
+          else
+            echo "No latest test result file found"
+          fi
+        else
+          echo "No test result files found matching pattern test_results_*.json"
+        fi
+      shell: bash
+      
+    - name: Upload artifacts to GitHub
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: hardware-test-results-latest-${{ github.run_number }}
+        path: artifacts/
+        retention-days: 30
+        if-no-files-found: warn
